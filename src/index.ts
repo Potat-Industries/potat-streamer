@@ -1,18 +1,73 @@
 import puppeteer, { Browser, CookieData, LaunchOptions } from 'puppeteer';
-import { spawn } from 'child_process';
+import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import { readFileSync, writeFileSync } from 'fs';
 import Logger from './logger.js';
 import config from '../config.json' with { type: 'json' };
 import { Broker } from './broker.js';
+import { readFile } from 'fs/promises';
 
 if (!config.streamKey || !config.grafanaUrl) {
   Logger.error('Please provide streamKey and grafanaUrl in config.json');
   process.exit(1);
 }
 
+const startupImage = await readFile('image.png').catch(() => {
+  Logger.error('Could not read startup image');
+  process.exit(1);
+});
+
 const broker = new Broker();
 
 await broker.connect();
+
+const spawnFFmpeg = async () => {
+  const ffmpeg = spawn('ffmpeg', [
+    '-y',
+    '-re',
+    '-stream_loop', '-1',
+    '-f', 'image2pipe',
+    '-r', '30',
+    '-i', '-',
+    '-i', 'music.mp3',
+    '-filter_complex', '[1:a]aloop=loop=-1:size=2e9[aout]',
+    '-map', '0:v',
+    '-map', '[aout]',
+    '-c:v', 'libx264',
+    '-preset', 'veryfast',
+    '-pix_fmt', 'yuv420p',
+    '-b:v', '5000k',
+    '-maxrate', '6000k',
+    '-bufsize', '12000k',
+    '-g', '60',
+    '-keyint_min', '60',
+    '-c:a', 'aac',
+    '-b:a', '128k',
+    '-f', 'flv',
+    `rtmp://live.twitch.tv/app/${config.streamKey}`,
+  ]);
+
+  Logger.debug('Spawned FFmpeg');
+
+  ffmpeg.stderr.on('data', (data) => {
+    // @todo - aggregate fps and bitrate for less frequent logging
+    Logger.debug('FFmpeg: '.concat(data.toString()));
+  });
+
+  ffmpeg.on('exit', () => {
+    Logger.error('FFmpeg exited');
+  });
+
+  return ffmpeg;
+};
+
+const startStreaming = async (ffmpeg: ChildProcessWithoutNullStreams, currentFrame: Buffer) => {
+  while (true) {
+    if (currentFrame) {
+      ffmpeg.stdin.write(currentFrame);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000 / 30));
+  }
+};
 
 const getBrowser = async () => {
   const browserConfig: LaunchOptions = {
@@ -51,47 +106,12 @@ const getClient = async (browser: Browser) => {
   return page.createCDPSession();
 };
 
-const spawnFFmpeg = async (browser: Browser) => {
-  const ffmpeg = spawn('ffmpeg', [
-    '-y',
-    '-re',
-    '-stream_loop', '-1',
-    '-f', 'image2pipe',
-    '-r', '30',
-    '-i', '-',
-    '-i', 'music.mp3',
-    '-filter_complex', '[1:a]aloop=loop=-1:size=2e9[aout]',
-    '-map', '0:v',
-    '-map', '[aout]',
-    '-c:v', 'libx264',
-    '-preset', 'veryfast',
-    '-pix_fmt', 'yuv420p',
-    '-b:v', '5000k',
-    '-maxrate', '6000k',
-    '-bufsize', '12000k',
-    '-g', '60',
-    '-keyint_min', '60',
-    '-c:a', 'aac',
-    '-b:a', '128k',
-    '-f', 'flv',
-    `rtmp://live.twitch.tv/app/${config.streamKey}`,
-  ]);
-
-  Logger.debug('Spawned FFmpeg');
-
-  ffmpeg.stderr.on('data', (data) => {
-    // @todo - aggregate fps and bitrate for less frequent logging
-    Logger.debug('FFmpeg: '.concat(data.toString()));
-  });
-
-  ffmpeg.on('exit', () => {
-    Logger.error('FFmpeg exited');
-    browser.close();
-  });
-  return ffmpeg;
-};
-
 (async () => {
+  const ffmpeg = await spawnFFmpeg();
+
+  let currentFrame = startupImage;
+  startStreaming(ffmpeg, currentFrame);
+
   const browser = await getBrowser();
   Logger.debug('Created browser');
 
@@ -102,22 +122,11 @@ const spawnFFmpeg = async (browser: Browser) => {
 
   const client = await getClient(browser);
   await client.send('Page.enable');
-
-  const ffmpeg = await spawnFFmpeg(browser);
   await client.send('Page.startScreencast', { format: 'png', everyNthFrame: 1 });
-
-  let currentFrame;
   client.on('Page.screencastFrame', async ({ data, sessionId }) => {
     currentFrame = Buffer.from(data, 'base64');
     await client.send('Page.screencastFrameAck', { sessionId });
   });
 
   Logger.debug('Started screencast');
-
-  while (true) {
-    if (currentFrame) {
-      ffmpeg.stdin.write(currentFrame);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000 / 30));
-  }
 })();
