@@ -1,0 +1,18 @@
+[
+  {
+    "name": "fortnite_battlepass",
+    "value": "i just shit, out my ass",
+    "domain":"monitor.potat.app",
+    "path":"/",
+    "expires":1743920345.111579,
+    "size":47,
+    "httpOnly":true,
+    "secure":false,
+    "session":false,
+    "sameSite":"Lax",
+    "priority":"Medium",
+    "sameParty":false,
+    "sourceScheme":"Secure",
+    "sourcePort":443
+  }
+]
