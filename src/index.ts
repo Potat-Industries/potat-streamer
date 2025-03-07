@@ -16,6 +16,10 @@ const startupImage = await readFile('image.png').catch(() => {
   process.exit(1);
 });
 
+const currentFrame = {
+  frame: startupImage,
+};
+
 const broker = new Broker();
 
 await broker.connect();
@@ -60,10 +64,10 @@ const spawnFFmpeg = async () => {
   return ffmpeg;
 };
 
-const startStreaming = async (ffmpeg: ChildProcessWithoutNullStreams, currentFrame: Buffer) => {
+const startStreaming = async (ffmpeg: ChildProcessWithoutNullStreams) => {
   while (true) {
     if (currentFrame) {
-      ffmpeg.stdin.write(currentFrame);
+      ffmpeg.stdin.write(currentFrame.frame);
     }
     await new Promise((resolve) => setTimeout(resolve, 1000 / 30));
   }
@@ -109,8 +113,7 @@ const getClient = async (browser: Browser) => {
 (async () => {
   const ffmpeg = await spawnFFmpeg();
 
-  let currentFrame = startupImage;
-  startStreaming(ffmpeg, currentFrame);
+  startStreaming(ffmpeg);
 
   const browser = await getBrowser();
   Logger.debug('Created browser');
@@ -124,7 +127,7 @@ const getClient = async (browser: Browser) => {
   await client.send('Page.enable');
   await client.send('Page.startScreencast', { format: 'png', everyNthFrame: 1 });
   client.on('Page.screencastFrame', async ({ data, sessionId }) => {
-    currentFrame = Buffer.from(data, 'base64');
+    currentFrame.frame = Buffer.from(data, 'base64');
     await client.send('Page.screencastFrameAck', { sessionId });
   });
 
