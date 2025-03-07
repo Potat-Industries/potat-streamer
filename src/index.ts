@@ -53,7 +53,6 @@ const spawnFFmpeg = async () => {
   Logger.debug('Spawned FFmpeg');
 
   ffmpeg.stderr.on('data', (data) => {
-    // @todo - aggregate fps and bitrate for less frequent logging
     Logger.debug('FFmpeg: '.concat(data.toString()));
   });
 
