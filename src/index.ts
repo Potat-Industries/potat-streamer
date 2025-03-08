@@ -1,6 +1,6 @@
 import puppeteer, { Browser, CookieData, LaunchOptions } from 'puppeteer';
-import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import { readFileSync, writeFileSync } from 'fs';
+import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import Logger from './logger.js';
 import config from '../config.json' with { type: 'json' };
 import { Broker } from './broker.js';
@@ -16,7 +16,7 @@ const startupImage = await readFile('image.png').catch(() => {
   process.exit(1);
 });
 
-const currentFrame = {
+const currentFrame: { frame: Buffer<ArrayBufferLike> } = {
   frame: startupImage,
 };
 
@@ -56,8 +56,12 @@ const spawnFFmpeg = async () => {
     Logger.debug('FFmpeg: '.concat(data.toString()));
   });
 
-  ffmpeg.on('exit', () => {
-    Logger.error('FFmpeg exited');
+  ffmpeg.on('exit', (code, signal) => {
+    Logger.error(`FFmpeg exited with code ${code}, signal ${signal}`);
+  });
+
+  ffmpeg.on('error', (err) => {
+    Logger.error('FFmpeg error:', (err as Error).message);
   });
 
   return ffmpeg;
@@ -65,8 +69,11 @@ const spawnFFmpeg = async () => {
 
 const startStreaming = async (ffmpeg: ChildProcessWithoutNullStreams) => {
   while (true) {
-    if (currentFrame) {
+    try {
       ffmpeg.stdin.write(currentFrame.frame);
+    } catch (err) {
+      Logger.error('Error writing to FFmpeg stdin:', (err as Error).message);
+      process.exit(1);
     }
     await new Promise((resolve) => setTimeout(resolve, 1000 / 30));
   }
@@ -75,7 +82,7 @@ const startStreaming = async (ffmpeg: ChildProcessWithoutNullStreams) => {
 const getBrowser = async () => {
   const browserConfig: LaunchOptions = {
     headless: true,
-    args: ['--window-size=1920,1080'],
+    args: ['--window-size=1920,1080', '--no-sandbox'],
   };
 
   if (config.executablePath) {
@@ -100,9 +107,8 @@ const getClient = async (browser: Browser) => {
   await page.setViewport({ width: 1920, height: 1080 });
   await page.goto(config.grafanaUrl, { waitUntil: 'networkidle0' });
 
-  await page.click('#dock-menu-button');
-
   if (config.injectedCss) {
+    await page.click('#dock-menu-button');
     await page.addStyleTag({ content: config.injectedCss });
   }
 

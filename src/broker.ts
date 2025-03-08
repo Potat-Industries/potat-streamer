@@ -125,8 +125,7 @@ export class Broker {
 
       this.channel?.ack(msg);
 
-      // eslint-disable-next-line no-unused-vars
-      const [topic, _] = this.parseMessage(message);
+      const [topic] = this.parseMessage(message);
       if (!topic) return;
 
       switch (topic) {
