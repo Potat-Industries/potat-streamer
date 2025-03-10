@@ -1,4 +1,9 @@
-import puppeteer, { Browser, CookieData, LaunchOptions } from 'puppeteer';
+import puppeteer, {
+  Browser,
+  CDPSession,
+  CookieData,
+  LaunchOptions,
+} from 'puppeteer';
 import { readFileSync, writeFileSync } from 'fs';
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import Logger from './logger.js';
@@ -23,10 +28,12 @@ const currentFrame: { frame: Buffer<ArrayBufferLike> } = {
 
 const broker = new Broker();
 
-await broker.connect();
-
+// eslint-disable-next-line no-undef
+let cookieLoopId: NodeJS.Timeout | undefined;
+let browserSession: Browser | undefined;
 let restarting = false;
 let restartCount = 0;
+let clientListener: CDPSession | undefined;
 let pid: number | undefined;
 let cleanupFFmpeg: () => void = () => {};
 
@@ -77,29 +84,39 @@ const closeFFmpeg = async () => {
     pid = undefined;
     cleanupFFmpeg = () => {};
 
-    Logger.debug('FFmpeg cleanup function reset');
     resolve(true);
   });
 };
 
 const shutdownHook = async () => {
   Logger.debug('Killing FFmpeg process...');
-  closeFFmpeg();
+  await closeFFmpeg();
+  await browserSession?.close();
+  await broker.destroy();
   Logger.debug('Exiting...');
   process.exit();
+};
+
+const errorToString = (e: unknown): string => {
+  if (e instanceof Error) {
+    return e.message + '\n' + e.stack;
+  }
+  if (typeof e === 'string') {
+    return e;
+  }
+  return JSON.stringify(e);
 };
 
 process.on('SIGINT', shutdownHook);
 process.on('SIGTERM', shutdownHook);
 process.on('exit', shutdownHook);
 process.on('uncaughtException', (err) => {
-  Logger.error('Uncaught Exception:', (err as Error).message);
+  Logger.error('Uncaught Exception:', errorToString(err));
   ++restartCount;
   restartStream();
 });
 process.on('unhandledRejection', (reason) => {
-  Logger.error('Unhandled Rejection:', (reason as Error).message);
-  ++restartCount;
+  Logger.error('Unhandled Rejection:', errorToString(reason));
 });
 
 const spawnFFmpeg = async () => {
@@ -132,10 +149,14 @@ const spawnFFmpeg = async () => {
 
   cleanupFFmpeg = async () => {
     try {
-      Logger.debug('Cleaning up FFmpeg...');
+      Logger.warn('Cleaning up FFmpeg...');
       ffmpeg.stdin.end();
       ffmpeg.stdout.destroy();
       ffmpeg.stderr.destroy();
+      clearInterval(cookieLoopId);
+      if (clientListener) {
+        clientListener.removeAllListeners();
+      }
     } catch (err) {
       Logger.error('Error cleaning up FFmpeg:', (err as Error).message);
     }
@@ -147,10 +168,6 @@ const spawnFFmpeg = async () => {
     Logger.debug('FFmpeg: '.concat(data.toString()));
   });
 
-  ffmpeg.on('exit', (code, signal) => {
-    Logger.error(`FFmpeg exited with code ${code}, signal ${signal}`);
-  });
-
   ffmpeg.on('error', (err) => {
     Logger.error('FFmpeg error:', (err as Error).message);
   });
@@ -160,6 +177,10 @@ const spawnFFmpeg = async () => {
 
 const startStreaming = async (ffmpeg: ChildProcessWithoutNullStreams) => {
   while (true) {
+    if (!ffmpeg.stdin.writable) {
+      break;
+    }
+
     try {
       if (currentFrame.frame) {
         ffmpeg.stdin.write(currentFrame.frame);
@@ -173,6 +194,10 @@ const startStreaming = async (ffmpeg: ChildProcessWithoutNullStreams) => {
 };
 
 const getBrowser = async () => {
+  if (browserSession) {
+    await browserSession.close();
+  }
+
   const browserConfig: LaunchOptions = {
     headless: true,
     args: ['--window-size=1920,1080', '--no-sandbox'],
@@ -216,18 +241,18 @@ const initStream = async () => {
 
   startStreaming(ffmpeg);
 
-  const browser = await getBrowser();
+  browserSession = await getBrowser();
   Logger.debug('Created browser');
 
   const cookies = JSON.parse(readFileSync('cookies.json', 'utf8'));
-  await browser.setCookie(...cookies);
+  await browserSession.setCookie(...cookies);
 
-  updateCookies(browser, cookies);
+  cookieLoopId = updateCookies(browserSession, cookies);
 
-  const client = await getClient(browser);
+  const client = await getClient(browserSession);
   await client.send('Page.enable');
   await client.send('Page.startScreencast', { format: 'png', everyNthFrame: 1 });
-  client.on('Page.screencastFrame', async ({ data, sessionId }) => {
+  clientListener = client.on('Page.screencastFrame', async ({ data, sessionId }) => {
     currentFrame.frame = Buffer.from(data, 'base64');
     await client.send('Page.screencastFrameAck', { sessionId });
   });
@@ -235,4 +260,6 @@ const initStream = async () => {
   Logger.debug('Started screencast');
 };
 
-initStream();
+await initStream();
+
+await broker.connect();
