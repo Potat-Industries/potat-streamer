@@ -17,6 +17,7 @@
     "chalk": "^5.4.1",
     "moment-timezone": "^0.5.47",
     "puppeteer": "^24.4.0",
+    "tree-kill": "^1.2.2",
     "winston": "^3.17.0"
   },
   "devDependencies": {

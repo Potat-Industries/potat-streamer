@@ -1,6 +1,8 @@
 import ampqlib from 'amqplib';
 import Logger from './logger.js';
 import config from '../config.json' with { type: 'json' };
+import { Page } from 'puppeteer';
+import { restartStream } from './index.js';
 
 export class Broker {
   private connection?: ampqlib.Connection;
@@ -8,6 +10,8 @@ export class Broker {
   private channel?: ampqlib.Channel;
 
   readonly #options: ampqlib.Options.Connect;
+
+  public page: Page | undefined;
 
   #retryCount = 0;
 
@@ -18,6 +22,10 @@ export class Broker {
       username: config.rabbitmq?.username,
       password: config.rabbitmq?.password,
     };
+  }
+
+  set setPage(page: Page | undefined) {
+    this.page = page;
   }
 
   public async connect(): Promise<void> {
@@ -34,6 +42,8 @@ export class Broker {
 
       await this.setQueues();
       this.#retryCount = 0;
+
+      this.ping();
     } catch (e) {
       Logger.error(`Failed to connect to broker: ${(e as Error).message}`);
       return this.reconnect();
@@ -75,7 +85,17 @@ export class Broker {
       noLocal: true,
     });
 
-    await this.publish('potat-streamer', 'ping');
+    await this.publish('potat-api', 'ping');
+  }
+
+  public ping(): void {
+    if (!this.connection) {
+      Logger.error('Failed to ping broker: no connection');
+      return;
+    }
+
+    Logger.debug('Pinging broker...');
+    this.publish('potat-streamer', 'ping');
   }
 
   public async publish(
@@ -125,7 +145,7 @@ export class Broker {
 
       this.channel?.ack(msg);
 
-      const [topic] = this.parseMessage(message);
+      const [topic, data] = this.parseMessage(message);
       if (!topic) return;
 
       switch (topic) {
@@ -138,6 +158,72 @@ export class Broker {
         case 'connected':
           Logger.debug('Broker reconnected');
           break;
+        case 'restart': {
+          Logger.debug(`Restarting stream`);
+          const result = await restartStream();
+          await this.publish('potat-streamer', `streamer-restart:${JSON.stringify(result)}`);
+          break;
+        }
+        case 'reload': {
+          if (this.page) {
+            Logger.debug('Reloading page');
+            const result = await this.page.reload();
+            if (result) {
+              await this.publish('potat-streamer', `streamer-reload:${JSON.stringify(true)}`);
+            } else {
+              await this.publish('potat-streamer', `streamer-reload:${JSON.stringify(false)}`);
+              Logger.warn('Page reload failed');
+            }
+          } else {
+            Logger.warn('Page is not defined, cannot reload');
+          }
+          break;
+        }
+        case 'eval': {
+          if (this.page) {
+            const jobId = data?.id;
+            let code = data?.code;
+            if (!jobId || !code) {
+              Logger.warn('Invalid eval data');
+              return;
+            }
+
+            if (/return|await/.test(code)) {
+              code = `(async () => { ${code} } )()`;
+            }
+
+            const toString = async (something: any): Promise<string> => {
+              if (something instanceof Error) {
+                return something.constructor.name + ': ' + something.message;
+              }
+              if (something instanceof Promise) {
+                return something.then(toString);
+              }
+              if (Array.isArray(something)) {
+                return something.map((item: any) => toString(item)).join(', ');
+              }
+              if (typeof something === 'function' || typeof something === 'symbol') {
+                return something.toString();
+              }
+              return JSON.stringify(something);
+            };
+
+            Logger.debug(`Evaluating script: ${code}`);
+            const result = await Promise
+              .resolve(eval(code))
+              .then(toString);
+
+            await this.publish(
+              'potat-streamer',
+              `streamer-eval:${JSON.stringify({ id: jobId, result })}`,
+            );
+
+            Logger.debug(`Script evaluated: ${result}`);
+          } else {
+            Logger.warn('Page is not defined, cannot evaluate script');
+          }
+          break;
+        }
         default:
           Logger.warn(`Unhandled message topic: ${topic}`);
       }

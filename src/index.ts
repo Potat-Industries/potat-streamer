@@ -5,6 +5,7 @@ import Logger from './logger.js';
 import config from '../config.json' with { type: 'json' };
 import { Broker } from './broker.js';
 import { readFile } from 'fs/promises';
+import kill from 'tree-kill';
 
 if (!config.streamKey || !config.grafanaUrl) {
   Logger.error('Please provide streamKey and grafanaUrl in config.json');
@@ -23,6 +24,83 @@ const currentFrame: { frame: Buffer<ArrayBufferLike> } = {
 const broker = new Broker();
 
 await broker.connect();
+
+let restarting = false;
+let restartCount = 0;
+let pid: number | undefined;
+let cleanupFFmpeg: () => void = () => {};
+
+export const restartStream = async () => {
+  if (restartCount >= 5) {
+    Logger.error('Restart limit reached. Exiting...');
+    shutdownHook();
+  }
+  if (restarting) {
+    return;
+  }
+
+  restarting = true;
+  try {
+    Logger.debug('Restarting stream...');
+    await closeFFmpeg();
+    broker.setPage = undefined;
+    await initStream();
+    Logger.debug('Stream restarted');
+    return true;
+  } catch (e) {
+    Logger.error('Failed to restart stream:', (e as Error).message);
+    return false;
+  } finally {
+    restarting = false;
+    restartCount = 0;
+  }
+};
+
+const closeFFmpeg = async () => {
+  return new Promise((resolve) => {
+    cleanupFFmpeg();
+    if (pid) {
+      Logger.warn(`Killing FFmpeg process with PID: ${pid}`);
+
+      // Use tree-kill and spam it to ensure all child processes are killed.
+      kill(pid, 'SIGKILL', (err) => {
+        if (err) {
+          Logger.error('Failed to kill FFmpeg process: ', (err as Error).message);
+        } else {
+          Logger.debug('FFmpeg process killed');
+        }
+      });
+    } else {
+      Logger.error('No FFmpeg process found to kill!');
+    }
+
+    pid = undefined;
+    cleanupFFmpeg = () => {};
+
+    Logger.debug('FFmpeg cleanup function reset');
+    resolve(true);
+  });
+};
+
+const shutdownHook = async () => {
+  Logger.debug('Killing FFmpeg process...');
+  closeFFmpeg();
+  Logger.debug('Exiting...');
+  process.exit();
+};
+
+process.on('SIGINT', shutdownHook);
+process.on('SIGTERM', shutdownHook);
+process.on('exit', shutdownHook);
+process.on('uncaughtException', (err) => {
+  Logger.error('Uncaught Exception:', (err as Error).message);
+  ++restartCount;
+  restartStream();
+});
+process.on('unhandledRejection', (reason) => {
+  Logger.error('Unhandled Rejection:', (reason as Error).message);
+  ++restartCount;
+});
 
 const spawnFFmpeg = async () => {
   const ffmpeg = spawn('ffmpeg', [
@@ -50,6 +128,19 @@ const spawnFFmpeg = async () => {
     `rtmp://live.twitch.tv/app/${config.streamKey}`,
   ]);
 
+  pid = ffmpeg.pid;
+
+  cleanupFFmpeg = async () => {
+    try {
+      Logger.debug('Cleaning up FFmpeg...');
+      ffmpeg.stdin.end();
+      ffmpeg.stdout.destroy();
+      ffmpeg.stderr.destroy();
+    } catch (err) {
+      Logger.error('Error cleaning up FFmpeg:', (err as Error).message);
+    }
+  };
+
   Logger.debug('Spawned FFmpeg');
 
   ffmpeg.stderr.on('data', (data) => {
@@ -70,7 +161,9 @@ const spawnFFmpeg = async () => {
 const startStreaming = async (ffmpeg: ChildProcessWithoutNullStreams) => {
   while (true) {
     try {
-      ffmpeg.stdin.write(currentFrame.frame);
+      if (currentFrame.frame) {
+        ffmpeg.stdin.write(currentFrame.frame);
+      }
     } catch (err) {
       Logger.error('Error writing to FFmpeg stdin:', (err as Error).message);
       process.exit(1);
@@ -104,6 +197,9 @@ const updateCookies = (browser: Browser, cookies: CookieData[]) => {
 
 const getClient = async (browser: Browser) => {
   const page = await browser.newPage();
+
+  broker.setPage = page;
+
   await page.setViewport({ width: 1920, height: 1080 });
   await page.goto(config.grafanaUrl, { waitUntil: 'networkidle0' });
 
@@ -115,7 +211,7 @@ const getClient = async (browser: Browser) => {
   return page.createCDPSession();
 };
 
-(async () => {
+const initStream = async () => {
   const ffmpeg = await spawnFFmpeg();
 
   startStreaming(ffmpeg);
@@ -137,4 +233,6 @@ const getClient = async (browser: Browser) => {
   });
 
   Logger.debug('Started screencast');
-})();
+};
+
+initStream();
