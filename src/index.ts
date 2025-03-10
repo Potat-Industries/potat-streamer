@@ -49,12 +49,12 @@ class Streamer {
     process.on('SIGTERM', this.shutdownHook.bind(this));
     process.on('exit', this.shutdownHook.bind(this));
     process.on('uncaughtException', (err) => {
-      Logger.error('Uncaught Exception:', this.errorToString(err));
+      Logger.error('Uncaught Exception:', (err as Error).stack ?? err.toString());
       ++this.restartCount;
       this.restartStream.bind(this);
     });
-    process.on('unhandledRejection', (reason) => {
-      Logger.error('Unhandled Rejection:', this.errorToString(reason));
+    process.on('unhandledRejection', (err) => {
+      Logger.error('Unhandled Rejection:', (err as Error).stack ?? JSON.stringify(err));
     });
 
     this.initStream().then(() => this.broker.connect());
@@ -94,7 +94,7 @@ class Streamer {
       if (this.pid) {
         Logger.warn(`Killing FFmpeg process with PID: ${this.pid}`);
 
-        // Use tree-kill and spam it to ensure all child processes are killed.
+        // Use tree-kill to ensure all child processes are killed.
         kill(this.pid, 'SIGKILL', (err) => {
           if (err) {
             Logger.error('Failed to kill FFmpeg process: ', (err as Error).message);
@@ -120,17 +120,6 @@ class Streamer {
     await this.broker.destroy();
     Logger.debug('Exiting...');
     process.exit();
-  }
-
-  private errorToString(e: unknown): string {
-    if (e instanceof Error) {
-      return e.message + '\n' + e.stack;
-    }
-    if (typeof e === 'string') {
-      return e;
-    }
-
-    return JSON.stringify(e);
   }
 
   private async spawnFFmpeg(): Promise<ChildProcessWithoutNullStreams> {
