@@ -1,3 +1,4 @@
+/* eslint-disable no-undef */
 import puppeteer, {
   Browser,
   CDPSession,
@@ -7,259 +8,271 @@ import puppeteer, {
 import { readFileSync, writeFileSync } from 'fs';
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import Logger from './logger.js';
-import config from '../config.json' with { type: 'json' };
+import configuration from '../config.json' with { type: 'json' };
 import { Broker } from './broker.js';
 import { readFile } from 'fs/promises';
 import kill from 'tree-kill';
 
-if (!config.streamKey || !config.grafanaUrl) {
-  Logger.error('Please provide streamKey and grafanaUrl in config.json');
-  process.exit(1);
-}
-
 const startupImage = await readFile('image.png').catch(() => {
   Logger.error('Could not read startup image');
-  process.exit(1);
 });
 
-const currentFrame: { frame: Buffer<ArrayBufferLike> } = {
-  frame: startupImage,
-};
+class Streamer {
+  private cookieLoopId: NodeJS.Timeout | undefined;
 
-const broker = new Broker();
+  private browserSession: Browser | undefined;
 
-// eslint-disable-next-line no-undef
-let cookieLoopId: NodeJS.Timeout | undefined;
-let browserSession: Browser | undefined;
-let restarting = false;
-let restartCount = 0;
-let clientListener: CDPSession | undefined;
-let pid: number | undefined;
-let cleanupFFmpeg: () => void = () => {};
+  private restarting = false;
 
-export const restartStream = async () => {
-  if (restartCount >= 5) {
-    Logger.error('Restart limit reached. Exiting...');
-    shutdownHook();
-  }
-  if (restarting) {
-    return;
-  }
+  private restartCount = 0;
 
-  restarting = true;
-  try {
-    Logger.debug('Restarting stream...');
-    await closeFFmpeg();
-    broker.setPage = undefined;
-    await initStream();
-    Logger.debug('Stream restarted');
-    return true;
-  } catch (e) {
-    Logger.error('Failed to restart stream:', (e as Error).message);
-    return false;
-  } finally {
-    restarting = false;
-    restartCount = 0;
-  }
-};
+  private clientListener: CDPSession | undefined;
 
-const closeFFmpeg = async () => {
-  return new Promise((resolve) => {
-    cleanupFFmpeg();
-    if (pid) {
-      Logger.warn(`Killing FFmpeg process with PID: ${pid}`);
+  private pid: number | undefined;
 
-      // Use tree-kill and spam it to ensure all child processes are killed.
-      kill(pid, 'SIGKILL', (err) => {
-        if (err) {
-          Logger.error('Failed to kill FFmpeg process: ', (err as Error).message);
-        } else {
-          Logger.debug('FFmpeg process killed');
-        }
-      });
-    } else {
-      Logger.error('No FFmpeg process found to kill!');
-    }
+  private config: typeof configuration;
 
-    pid = undefined;
-    cleanupFFmpeg = () => {};
+  private cleanupFFmpeg: () => void = () => {};
 
-    resolve(true);
-  });
-};
+  private readonly currentFrame = { frame: startupImage ?? Buffer.alloc(0) };
 
-const shutdownHook = async () => {
-  Logger.debug('Killing FFmpeg process...');
-  await closeFFmpeg();
-  await browserSession?.close();
-  await broker.destroy();
-  Logger.debug('Exiting...');
-  process.exit();
-};
+  private readonly broker = new Broker();
 
-const errorToString = (e: unknown): string => {
-  if (e instanceof Error) {
-    return e.message + '\n' + e.stack;
-  }
-  if (typeof e === 'string') {
-    return e;
-  }
-  return JSON.stringify(e);
-};
-
-process.on('SIGINT', shutdownHook);
-process.on('SIGTERM', shutdownHook);
-process.on('exit', shutdownHook);
-process.on('uncaughtException', (err) => {
-  Logger.error('Uncaught Exception:', errorToString(err));
-  ++restartCount;
-  restartStream();
-});
-process.on('unhandledRejection', (reason) => {
-  Logger.error('Unhandled Rejection:', errorToString(reason));
-});
-
-const spawnFFmpeg = async () => {
-  const ffmpeg = spawn('ffmpeg', [
-    '-y',
-    '-re',
-    '-stream_loop', '-1',
-    '-f', 'image2pipe',
-    '-r', '30',
-    '-i', '-',
-    '-i', 'music.mp3',
-    '-filter_complex', '[1:a]aloop=loop=-1:size=2e9[aout]',
-    '-map', '0:v',
-    '-map', '[aout]',
-    '-c:v', 'libx264',
-    '-preset', 'veryfast',
-    '-pix_fmt', 'yuv420p',
-    '-b:v', '5000k',
-    '-maxrate', '6000k',
-    '-bufsize', '12000k',
-    '-g', '60',
-    '-keyint_min', '60',
-    '-c:a', 'aac',
-    '-b:a', '128k',
-    '-f', 'flv',
-    `rtmp://live.twitch.tv/app/${config.streamKey}`,
-  ]);
-
-  pid = ffmpeg.pid;
-
-  cleanupFFmpeg = async () => {
-    try {
-      Logger.warn('Cleaning up FFmpeg...');
-      ffmpeg.stdin.end();
-      ffmpeg.stdout.destroy();
-      ffmpeg.stderr.destroy();
-      clearInterval(cookieLoopId);
-      if (clientListener) {
-        clientListener.removeAllListeners();
-      }
-    } catch (err) {
-      Logger.error('Error cleaning up FFmpeg:', (err as Error).message);
-    }
-  };
-
-  Logger.debug('Spawned FFmpeg');
-
-  ffmpeg.stderr.on('data', (data) => {
-    Logger.debug('FFmpeg: '.concat(data.toString()));
-  });
-
-  ffmpeg.on('error', (err) => {
-    Logger.error('FFmpeg error:', (err as Error).message);
-  });
-
-  return ffmpeg;
-};
-
-const startStreaming = async (ffmpeg: ChildProcessWithoutNullStreams) => {
-  while (true) {
-    if (!ffmpeg.stdin.writable) {
-      break;
-    }
-
-    try {
-      if (currentFrame.frame) {
-        ffmpeg.stdin.write(currentFrame.frame);
-      }
-    } catch (err) {
-      Logger.error('Error writing to FFmpeg stdin:', (err as Error).message);
+  constructor(config: typeof configuration) {
+    this.config = config;
+    if (!this.config.streamKey || !this.config.grafanaUrl) {
+      Logger.error('Please provide streamKey and grafanaUrl in this.config.json');
       process.exit(1);
     }
-    await new Promise((resolve) => setTimeout(resolve, 1000 / 30));
-  }
-};
 
-const getBrowser = async () => {
-  if (browserSession) {
-    await browserSession.close();
-  }
+    process.on('SIGINT', this.shutdownHook.bind(this));
+    process.on('SIGTERM', this.shutdownHook.bind(this));
+    process.on('exit', this.shutdownHook.bind(this));
+    process.on('uncaughtException', (err) => {
+      Logger.error('Uncaught Exception:', this.errorToString(err));
+      ++this.restartCount;
+      this.restartStream.bind(this);
+    });
+    process.on('unhandledRejection', (reason) => {
+      Logger.error('Unhandled Rejection:', this.errorToString(reason));
+    });
 
-  const browserConfig: LaunchOptions = {
-    headless: true,
-    args: ['--window-size=1920,1080', '--no-sandbox'],
-  };
-
-  if (config.executablePath) {
-    browserConfig.executablePath = config.executablePath;
+    this.initStream().then(() => this.broker.connect());
   }
 
-  return puppeteer.launch(browserConfig);
-};
-
-const updateCookies = (browser: Browser, cookies: CookieData[]) => {
-  return setInterval(async () => {
-    const newCookies = await browser.cookies();
-    if (JSON.stringify(cookies) !== JSON.stringify(newCookies)) {
-      writeFileSync('cookies.json', JSON.stringify(newCookies));
-      cookies = newCookies;
+  public async restartStream(): Promise<boolean> {
+    if (this.restartCount >= 5) {
+      Logger.error('Restart limit reached. Exiting...');
+      this.shutdownHook();
     }
-  }, 10000);
-};
+    if (this.restarting) {
+      return false;
+    }
 
-const getClient = async (browser: Browser) => {
-  const page = await browser.newPage();
+    this.restarting = true;
+    try {
+      Logger.debug('Restarting stream...');
+      await this.closeFFmpeg();
+      this.broker.setPage = undefined;
+      await this.initStream();
+      Logger.debug('Stream restarted');
 
-  broker.setPage = page;
+      return true;
+    } catch (e) {
+      Logger.error('Failed to restart stream:', (e as Error).message);
 
-  await page.setViewport({ width: 1920, height: 1080 });
-  await page.goto(config.grafanaUrl, { waitUntil: 'networkidle0' });
-
-  if (config.injectedCss) {
-    await page.click('#dock-menu-button');
-    await page.addStyleTag({ content: config.injectedCss });
+      return false;
+    } finally {
+      this.restarting = false;
+      this.restartCount = 0;
+    }
   }
 
-  return page.createCDPSession();
-};
+  private async closeFFmpeg(): Promise<boolean> {
+    return new Promise((resolve) => {
+      this.cleanupFFmpeg();
+      if (this.pid) {
+        Logger.warn(`Killing FFmpeg process with PID: ${this.pid}`);
 
-const initStream = async () => {
-  const ffmpeg = await spawnFFmpeg();
+        // Use tree-kill and spam it to ensure all child processes are killed.
+        kill(this.pid, 'SIGKILL', (err) => {
+          if (err) {
+            Logger.error('Failed to kill FFmpeg process: ', (err as Error).message);
+          } else {
+            Logger.debug('FFmpeg process killed');
+          }
+        });
+      } else {
+        Logger.error('No FFmpeg process found to kill!');
+      }
 
-  startStreaming(ffmpeg);
+      this.pid = undefined;
+      this.cleanupFFmpeg = () => {};
 
-  browserSession = await getBrowser();
-  Logger.debug('Created browser');
+      resolve(true);
+    });
+  }
 
-  const cookies = JSON.parse(readFileSync('cookies.json', 'utf8'));
-  await browserSession.setCookie(...cookies);
+  private async shutdownHook(): Promise<void> {
+    Logger.debug('Killing FFmpeg process...');
+    await this.closeFFmpeg();
+    await this.browserSession?.close();
+    await this.broker.destroy();
+    Logger.debug('Exiting...');
+    process.exit();
+  }
 
-  cookieLoopId = updateCookies(browserSession, cookies);
+  private errorToString(e: unknown): string {
+    if (e instanceof Error) {
+      return e.message + '\n' + e.stack;
+    }
+    if (typeof e === 'string') {
+      return e;
+    }
 
-  const client = await getClient(browserSession);
-  await client.send('Page.enable');
-  await client.send('Page.startScreencast', { format: 'png', everyNthFrame: 1 });
-  clientListener = client.on('Page.screencastFrame', async ({ data, sessionId }) => {
-    currentFrame.frame = Buffer.from(data, 'base64');
-    await client.send('Page.screencastFrameAck', { sessionId });
-  });
+    return JSON.stringify(e);
+  }
 
-  Logger.debug('Started screencast');
-};
+  private async spawnFFmpeg(): Promise<ChildProcessWithoutNullStreams> {
+    const ffmpeg = spawn('ffmpeg', [
+      '-y',
+      '-re',
+      '-stream_loop', '-1',
+      '-f', 'image2pipe',
+      '-r', '30',
+      '-i', '-',
+      '-i', 'music.mp3',
+      '-filter_complex', '[1:a]aloop=loop=-1:size=2e9[aout]',
+      '-map', '0:v',
+      '-map', '[aout]',
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-pix_fmt', 'yuv420p',
+      '-b:v', '5000k',
+      '-maxrate', '6000k',
+      '-bufsize', '12000k',
+      '-g', '60',
+      '-keyint_min', '60',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-f', 'flv',
+      `rtmp://live.twitch.tv/app/${this.config.streamKey}`,
+    ]);
 
-await initStream();
+    this.pid = ffmpeg.pid;
 
-await broker.connect();
+    this.cleanupFFmpeg = async (): Promise<void> => {
+      try {
+        Logger.warn('Cleaning up FFmpeg...');
+        ffmpeg.stdin.end();
+        ffmpeg.stdout.destroy();
+        ffmpeg.stderr.destroy();
+        clearInterval(this.cookieLoopId);
+        if (this.clientListener) {
+          this.clientListener.removeAllListeners();
+        }
+      } catch (err) {
+        Logger.error('Error cleaning up FFmpeg:', (err as Error).message);
+      }
+    };
+
+    Logger.debug('Spawned FFmpeg');
+
+    ffmpeg.stderr.on('data', (data) => {
+      Logger.debug('FFmpeg: '.concat(data.toString()));
+    });
+
+    ffmpeg.on('error', (err) => {
+      Logger.error('FFmpeg error:', (err as Error).message);
+    });
+
+    return ffmpeg;
+  }
+
+  private async startStreaming(ffmpeg: ChildProcessWithoutNullStreams): Promise<void> {
+    while (true) {
+      if (!ffmpeg.stdin.writable) {
+        break;
+      }
+
+      try {
+        if (this.currentFrame.frame) {
+          ffmpeg.stdin.write(this.currentFrame.frame);
+        }
+      } catch (err) {
+        Logger.error('Error writing to FFmpeg stdin:', (err as Error).message);
+        process.exit(1);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000 / 30));
+    }
+  }
+
+  private async getBrowser(): Promise<Browser> {
+    if (this.browserSession) {
+      await this.browserSession.close();
+    }
+
+    const browserConfig: LaunchOptions = {
+      headless: true,
+      args: ['--window-size=1920,1080', '--no-sandbox'],
+    };
+
+    if (this.config.executablePath) {
+      browserConfig.executablePath = this.config.executablePath;
+    }
+
+    return puppeteer.launch(browserConfig);
+  }
+
+  private updateCookies(browser: Browser, cookies: CookieData[]): NodeJS.Timeout {
+    return setInterval(async () => {
+      const newCookies = await browser.cookies();
+      if (JSON.stringify(cookies) !== JSON.stringify(newCookies)) {
+        writeFileSync('cookies.json', JSON.stringify(newCookies));
+        cookies = newCookies;
+      }
+    }, 10000);
+  }
+
+  private async getClient(browser: Browser): Promise<CDPSession> {
+    const page = await browser.newPage();
+
+    this.broker.setPage = page;
+
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.goto(this.config.grafanaUrl, { waitUntil: 'networkidle0' });
+
+    if (this.config.injectedCss) {
+      await page.click('#dock-menu-button');
+      await page.addStyleTag({ content: this.config.injectedCss });
+    }
+
+    return page.createCDPSession();
+  }
+
+  private async initStream(): Promise<void> {
+    const ffmpeg = await this.spawnFFmpeg();
+
+    this.startStreaming(ffmpeg);
+
+    this.browserSession = await this.getBrowser();
+    Logger.debug('Created browser');
+
+    const cookies = JSON.parse(readFileSync('cookies.json', 'utf8'));
+    await this.browserSession.setCookie(...cookies);
+
+    this.cookieLoopId = this.updateCookies(this.browserSession, cookies);
+
+    const client = await this.getClient(this.browserSession);
+    await client.send('Page.enable');
+    await client.send('Page.startScreencast', { format: 'png', everyNthFrame: 1 });
+    this.clientListener = client.on('Page.screencastFrame', async ({ data, sessionId }) => {
+      this.currentFrame.frame = Buffer.from(data, 'base64');
+      await client.send('Page.screencastFrameAck', { sessionId });
+    });
+
+    Logger.debug('Started screencast');
+  }
+}
+
+export const streamer = new Streamer(configuration);

@@ -2,7 +2,7 @@ import ampqlib from 'amqplib';
 import Logger from './logger.js';
 import config from '../config.json' with { type: 'json' };
 import { Page } from 'puppeteer';
-import { restartStream } from './index.js';
+import { streamer } from './index.js';
 
 export class Broker {
   private connection?: ampqlib.Connection;
@@ -160,7 +160,7 @@ export class Broker {
           break;
         case 'restart': {
           Logger.debug(`Restarting stream`);
-          const result = await restartStream();
+          const result = await streamer.restartStream();
           await this.publish('potat-streamer', `streamer-restart:${JSON.stringify(result)}`);
           break;
         }
