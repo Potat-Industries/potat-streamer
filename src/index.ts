@@ -231,12 +231,68 @@ class Streamer {
     await page.setViewport({ width: 1920, height: 1080 });
     await page.goto(this.config.grafanaUrl, { waitUntil: 'networkidle0' });
 
+    if (page.url() !== this.config.grafanaUrl) {
+      Logger.warn('Cookies expired... signing into Grafana');
+      await this.signIntoGrafana();
+      await page.goto(this.config.grafanaUrl, { waitUntil: 'networkidle0' });
+      if (page.url() !== this.config.grafanaUrl) {
+        throw new Error('Failed to sign into Grafana');
+      }
+    }
+
+    page.on('requestfailed', async (request) => {
+      if (request.response()?.status() === 403) {
+        Logger.warn('Cookies have expired... signing into Grafana');
+        await this.signIntoGrafana();
+        await page.goto(this.config.grafanaUrl, { waitUntil: 'networkidle0' });
+        if (page.url() !== this.config.grafanaUrl) {
+          throw new Error('Failed to re-sign into Grafana');
+        }
+      }
+    });
+
     if (this.config.injectedCss) {
-      await page.click('#dock-menu-button');
+      Logger.debug('Injecting CSS');
+      try {
+        await page.click('#dock-menu-button');
+      } catch {
+        Logger.warn('Dock menu button not found, skipping click for CSS injection');
+      }
       await page.addStyleTag({ content: this.config.injectedCss });
     }
 
     return page.createCDPSession();
+  }
+
+  private async signIntoGrafana(): Promise<void> {
+    if (!this.browserSession) {
+      throw new Error('Browser session not initialized');
+    }
+
+    const page = await this.browserSession.newPage();
+    await page.goto(this.config.grafanaUrl, { waitUntil: 'networkidle0' });
+
+    await page.type('[data-testid="data-testid Username input field"]', this.config.grafanaUser);
+    await page.type('[data-testid="data-testid Password input field"]', this.config.grafanaPass);
+
+    Logger.debug('Logging in...');
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'networkidle0' }),
+      page.click('[data-testid="data-testid Login button"]'),
+    ]);
+
+    Logger.debug('Logged in, updating cookies...');
+    const cookies = await this.browserSession.cookies();
+    writeFileSync('cookies.json', JSON.stringify(cookies));
+
+    if (this.cookieLoopId) {
+      clearInterval(this.cookieLoopId);
+    }
+
+    this.cookieLoopId = this.updateCookies(this.browserSession, cookies);
+
+    await page.close();
+    Logger.warn('Signed into Grafana!');
   }
 
   private async initStream(): Promise<void> {
@@ -253,6 +309,8 @@ class Streamer {
     this.cookieLoopId = this.updateCookies(this.browserSession, cookies);
 
     const client = await this.getClient(this.browserSession);
+    Logger.debug('Created page and client');
+
     await client.send('Page.enable');
     await client.send('Page.startScreencast', { format: 'png', everyNthFrame: 1 });
     this.clientListener = client.on('Page.screencastFrame', async ({ data, sessionId }) => {

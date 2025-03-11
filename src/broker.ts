@@ -34,7 +34,7 @@ export class Broker {
       this.channel = await this.connection.createChannel();
 
       this.connection?.on('close', async () => {
-        Logger.warn('Broker connection closed');
+        Logger.warn('Broker connection closed, reconnecting...');
         this.connection = undefined;
         this.channel = undefined;
 
