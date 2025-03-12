@@ -1,139 +1,140 @@
-import ampqlib from 'amqplib';
+/* eslint-disable no-unused-vars */ // fucking hate eslint SO MANY PLUGINS REQUIRED
 import Logger from './logger.js';
-import config from '../config.json' with { type: 'json' };
 import { Page } from 'puppeteer';
 import { streamer } from './index.js';
+import {
+  connect,
+  JSONCodec,
+  Msg,
+  NatsConnection,
+} from 'nats';
 
-export class Broker {
-  private connection?: ampqlib.Connection;
+export enum EventStream {
+  // Consumers
+  API = 'potat-api.>',
+  BOT = 'potatbotat.>',
+  STREAMER = 'potat-streamer.>',
 
-  private channel?: ampqlib.Channel;
+  // API Topics
+  API_PING = 'potat-api.ping',
+  API_PONG = 'potat-api.pong',
+  API_CONNECTED = 'potat-api.connected',
+  API_POSTGRES_BACKUP = 'potat-api.postgres-backup',
+  API_JOB_REQUEST = 'potat-api.job-request',
 
-  readonly #options: ampqlib.Options.Connect;
+  // Streamer Topics
+  STREAMER_PING = 'potat-streamer.ping',
+  STREAMER_PONG = 'potat-streamer.pong',
+  STREAMER_CONNECTED = 'potat-streamer.connected',
 
-  public page: Page | undefined;
+  // Bot Topics
+  PROXY_SOCKET = 'potatbotat.proxy-socket',
+  PING = 'potatbotat.ping',
+  PONG = 'potatbotat.pong',
+  STREAMER_EVAL = 'potatbotat.streamer-eval',
+  STREAMER_RESTART = 'potatbotat.streamer-restart',
+  STREAMER_RELOAD = 'potatbotat.streamer-reload',
+}
+
+export class NatsClient {
+  #client?: NatsConnection;
+
+  #jsoncodec = JSONCodec;
 
   #retryCount = 0;
 
-  constructor() {
-    this.#options = {
-      hostname: config.rabbitmq?.host,
-      port: config.rabbitmq?.port,
-      username: config.rabbitmq?.username,
-      password: config.rabbitmq?.password,
-    };
-  }
+  public page: Page | undefined;
 
   set setPage(page: Page | undefined) {
     this.page = page;
   }
 
-  public async connect(): Promise<void> {
+  readonly jobs: Map<string, any> = new Map();
+
+  public get client(): NatsConnection {
+    if (!this.#client) {
+      throw new Error('NATS client not initialized');
+    }
+
+    return this.#client;
+  }
+
+  public async initialize(): Promise<void> {
     try {
-      this.connection = await ampqlib.connect(this.#options);
-      this.channel = await this.connection.createChannel();
+      this.#client = await connect({ servers: 'localhost' });
 
-      this.connection?.on('close', async () => {
-        Logger.warn('Broker connection closed, reconnecting...');
-        this.connection = undefined;
-        this.channel = undefined;
+      const done = this.client.closed();
 
-        return this.reconnect();
-      });
-
-      await this.setQueues();
       this.#retryCount = 0;
 
-      this.ping();
-    } catch (e) {
-      Logger.error(`Failed to connect to broker: ${(e as Error).message}`);
+      this.setConsumer(EventStream.BOT);
 
-      return this.reconnect();
+      const ping = await this.#client.request(
+        EventStream.STREAMER_PING,
+        undefined,
+        { timeout: 5000 },
+      );
+
+      if (!ping) {
+        Logger.error('Failed to ping PotatBotat');
+      } else {
+        Logger.debug('Broker connected');
+        this.publish(EventStream.STREAMER_CONNECTED);
+      }
+
+      // blocking until the connection is closed
+      const err = await done;
+      if (err) {
+        Logger.error(`NATS connection closed: ${err.message}`);
+      }
+
+      if (this.client.isClosed() && !this.client.isDraining()) {
+        Logger.warn('NATS connection unexpectedly closed, reconnecting...');
+        return this.reconnect();
+      }
+
+      Logger.warn(`NATS connection closed`);
+    } catch (err) {
+      Logger.error(`Failed to connect to NATS: ${(err as Error).message}`);
+      this.reconnect();
     }
   }
 
   public async destroy(): Promise<void> {
-    if (this.connection) {
-      Logger.warn('Closing broker connection');
-      await this.channel?.close();
-      await this.connection.close();
+    if (this.#client) {
+      Logger.warn('Closing NATS connection');
+      await this.#client.drain();
     }
 
-    this.connection = undefined;
-    this.channel = undefined;
+    this.#client = undefined;
   }
 
   public async reconnect(): Promise<void> {
-    await this.destroy();
-
+    this.#client = undefined;
     this.#retryCount++;
     const delay = Math.min(1000 * 2 ** this.#retryCount, 30000); // Exponential backoff
     await new Promise((resolve) => setTimeout(resolve, delay));
 
-    return this.connect();
+    return this.initialize();
   }
 
-  public async setQueues(): Promise<void> {
-    if (!this.channel) {
-      Logger.error('Failed to create channel');
-
-      return this.reconnect();
-    }
-
-    const queue = await this.channel.assertQueue('potat-api', { durable: true });
-
-    await this.channel.assertExchange('potat-streamer', 'direct', { durable: true });
-    await this.channel.bindQueue(queue.queue, 'potat-streamer', 'potat-api');
-    await this.channel.consume(queue.queue, this.handleMessage.bind(this), {
-      noAck: false,
-      noLocal: true,
-    });
-
-    await this.publish('potat-api', 'ping');
-  }
-
-  public ping(): void {
-    if (!this.connection) {
-      Logger.error('Failed to ping broker: no connection');
-
-      return;
-    }
-
-    Logger.debug('Pinging broker...');
-  }
-
-  public async publish(
-    queue: string,
-    message: string,
-    options: ampqlib.Options.Publish = {},
-  ): Promise<void> {
-    if (!this.connection || !this.channel) {
-      return;
-    }
-
-    const ok = this.channel.sendToQueue(queue, Buffer.from(message), {
-      expiration: 5000,
-      /** scuffed way to ignore local queue consumption @todo dedicated 1 way exchanges */
-      correlationId: 'potat-streamer',
-      ...options,
-    });
-
-    if (!ok) {
-      Logger.error(`Failed to publish message to exchange ${queue}: ${message}`);
+  public async setConsumer(subject: string): Promise<void> {
+    for await (const message of this.client.subscribe(subject)) {
+      this.handleMessage(message);
     }
   }
 
-  private parseMessage(message: string): [string, any] {
+  public async publish(subject: string, data?: any): Promise<string> {
+    const id = `${subject}.${crypto.randomUUID()}`;
     try {
-      const [topic, ...rest] = message.split(':');
-      const data = rest.length ? JSON.parse(rest.join(':')) : null;
-
-      return [topic, data];
-    } catch (error) {
-      Logger.error(`Failed to parse message: ${message}`, (error as Error).toString());
-
-      return ['', null];
+      this.client.publish(subject, this.#jsoncodec<typeof data>().encode(data), {
+        reply: id,
+      });
+    } catch (err) {
+      Logger.error(`Failed to publish message to NATS: ${(err as Error).message}`);
     }
+
+    return id;
   }
 
   private async toString(something: any): Promise<string> {
@@ -153,108 +154,108 @@ export class Broker {
     return JSON.stringify(something);
   }
 
-  private async handleMessage(msg: ampqlib.ConsumeMessage | null): Promise<void> {
-    if (!msg) {
-      return;
+  public parseMessage<T = any>(data: Uint8Array): T {
+    let message: any;
+    try {
+      message = JSON.parse(data.toString());
+    } catch {
+      message = data.toString();
     }
 
-    try {
-      const message = msg.content.toString();
+    return message as T;
+  }
 
-      // Ignore locally sent messages, requeue for intended consumer
-      // TODO: add single directional queue/exchanges to skip the extra handling?
-      if (msg.properties.correlationId === 'potat-streamer') {
-        this.channel?.reject(msg, true);
+  public async handleMessage(message: Msg): Promise<void> {
+    const data = this.parseMessage(message.data);
 
-        return;
+    switch (message.subject) {
+      case EventStream.PING: {
+        message.respond(this.#jsoncodec().encode({ pong: true }));
+        break;
       }
+      case EventStream.PONG: {
+        Logger.debug('Broker connected');
 
-      this.channel?.ack(msg);
-
-      const [topic, data] = this.parseMessage(message);
-      if (!topic) {
-        return;
+        break;
       }
+      case EventStream.STREAMER_RELOAD: {
+        if (!message.reply) {
+          Logger.error('No reply subject provided for job request');
 
-      switch (topic) {
-        case 'ping': {
-          await this.publish('potat-api', 'pong');
-
-          break;
+          return;
         }
-        case 'pong': {
-          Logger.debug('Broker pong from', msg.properties.correlationId);
 
-          break;
-        }
-        case 'connected': {
-          Logger.debug('Broker reconnected');
-
-          break;
-        }
-        case 'restart': {
-          Logger.debug(`Restarting stream`);
-          const result = await streamer.restartStream();
-          await this.publish('potat-api', `streamer-restart:${JSON.stringify(result)}`);
-
-          break;
-        }
-        case 'reload': {
-          if (this.page) {
-            Logger.debug('Reloading page');
-            const result = await this.page.reload();
-            if (result) {
-              await this.publish('potat-api', `streamer-reload:${JSON.stringify(true)}`);
-            } else {
-              await this.publish('potat-api', `streamer-reload:${JSON.stringify(false)}`);
-              Logger.warn('Page reload failed');
-            }
+        if (this.page) {
+          Logger.debug('Reloading page');
+          const result = await this.page.reload();
+          if (result) {
+            await this.publish(message.reply, true);
           } else {
-            Logger.warn('Page is not defined, cannot reload');
+            await this.publish(message.reply, false);
+            Logger.warn('Page reload failed');
+          }
+        } else {
+          Logger.warn('Page is not defined, cannot reload');
+        }
+
+        break;
+      }
+      case EventStream.STREAMER_RESTART: {
+        if (!message.reply) {
+          Logger.error('No reply subject provided for job request');
+
+          return;
+        }
+
+        Logger.debug(`Restarting stream`);
+        const result = await streamer.restartStream();
+        await this.publish(message.reply, result);
+
+        break;
+      }
+      case EventStream.STREAMER_EVAL: {
+        if (!message.reply) {
+          Logger.error('No reply subject provided for job request');
+
+          return;
+        }
+
+        if (this.page) {
+          const jobId = data?.id;
+          let code = data?.code;
+          if (!jobId || !code) {
+            Logger.warn('Invalid eval data');
+
+            return;
           }
 
-          break;
-        }
-        case 'eval': {
-          if (this.page) {
-            const jobId = data?.id;
-            let code = data?.code;
-            if (!jobId || !code) {
-              Logger.warn('Invalid eval data');
-
-              return;
-            }
-
-            if (/return|await/.test(code)) {
-              code = `(async () => { ${code} } )()`;
-            }
-
-            Logger.debug(`Evaluating script: ${code}`);
-
-            try {
-              code = await this.page.evaluate(code).then(this.toString);
-            } catch (err) {
-              code = (err as Error).message;
-            }
-
-            await this.publish(
-              'potat-api',
-              `streamer-eval:${JSON.stringify({ id: jobId, result: code })}`,
-            );
-
-            Logger.debug(`Script evaluated: ${code}`);
-          } else {
-            Logger.warn('Page is not defined, cannot evaluate script');
+          if (/return|await/.test(code)) {
+            code = `(async () => { ${code} } )()`;
           }
 
-          break;
+          Logger.debug(`Evaluating script: ${code}`);
+
+          try {
+            code = await this.page.evaluate(code).then(this.toString);
+          } catch (err) {
+            code = (err as Error).message;
+          }
+
+          await this.publish(message.reply, { id: jobId, result: code });
+
+          Logger.debug(`Script evaluated: ${code}`);
+        } else {
+          Logger.warn('Page is not defined, cannot evaluate script');
         }
-        default: {
-          Logger.warn(`Unhandled message topic: ${topic}`);
-        }
+
+        break;
       }
-    } catch (error) {
-      Logger.error(`Error handling message: ${(error as Error).message}`);
+      case EventStream.PROXY_SOCKET: {
+        break;
+      }
+      default: {
+        Logger.warn(`Unknown message subject: ${message.subject}`);
+      }
     }
   }
 }

@@ -1,13 +1,10 @@
 {
   "streamKey": "amongus_sus",
-  "grafanaUrl": "buh",
+  "url": "buh",
+  "grafanaUser": "",
+  "grafanaPass": "",
+  "grafanaEnabled": false,
   "injectedCss": "[data-testid=\"data-testid Nav toolbar\"],\n[data-testid=\"data-testid dashboard controls\"],\n.css-119uihn {\n  display: none !important;\n}\n.css-biljvk-panel-title h2 {\n  font-size: 30px !important;\n}",
   "executablePath": "/usr/bin/chromium-browser",
-  "timezone": "America/Anchorage",
-  "rabbitmq": {
-    "host": "localhost",
-    "port": 5672,
-    "username": "guest",
-    "password": "guest"
-  }
+  "timezone": "America/Anchorage"
 }

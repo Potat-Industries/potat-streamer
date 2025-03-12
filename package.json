@@ -13,9 +13,9 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "amqplib": "^0.10.5",
     "chalk": "^5.4.1",
     "moment-timezone": "^0.5.47",
+    "nats": "^2.29.2",
     "puppeteer": "^24.4.0",
     "tree-kill": "^1.2.2",
     "winston": "^3.17.0"
