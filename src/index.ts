@@ -45,13 +45,13 @@ class Streamer {
       process.exit(1);
     }
 
-    process.on('SIGINT', this.shutdownHook.bind(this));
-    process.on('SIGTERM', this.shutdownHook.bind(this));
-    process.on('exit', this.shutdownHook.bind(this));
+    process.on('SIGINT', () => this.shutdownHook());
+    process.on('SIGTERM', () => this.shutdownHook());
+    process.on('exit', () => this.shutdownHook());
     process.on('uncaughtException', (err) => {
       Logger.error('Uncaught Exception:', (err as Error).stack ?? err.toString());
       ++this.restartCount;
-      this.restartStream.bind(this);
+      this.restartStream();
     });
     process.on('unhandledRejection', (err) => {
       Logger.error('Unhandled Rejection:', (err as Error).stack ?? JSON.stringify(err));
