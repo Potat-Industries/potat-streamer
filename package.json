@@ -7,7 +7,8 @@
     "start": "npm run build && npm run softstart",
     "softstart": "node --max-old-space-size=8192 --no-warnings --harmony-temporal ./dist/src/index.js",
     "build": "rm -rf ./dist && tsc && tsc-alias",
-    "lint:fix": "eslint --ext .ts ./src --fix"
+    "lint:fix": "eslint --ext .ts ./src --fix",
+    "lint": "eslint --ext .ts ./src"
   },
   "author": "",
   "license": "ISC",
