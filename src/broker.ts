@@ -56,6 +56,8 @@ export class NatsClient {
       throw new Error('NATS client not initialized');
     }
 
+    setInterval(() => this.page?.reload(), 10 * 60 * 60 * 1000);
+
     return this.#client;
   }
 
@@ -135,23 +137,6 @@ export class NatsClient {
     }
 
     return id;
-  }
-
-  private async toString(something: any): Promise<string> {
-    if (something instanceof Error) {
-      return something.constructor.name + ': ' + something.message;
-    }
-    if (something instanceof Promise) {
-      return something.then(toString);
-    }
-    if (Array.isArray(something)) {
-      return something.map(this.toString).join(', ');
-    }
-    if (typeof something === 'function' || typeof something === 'symbol') {
-      return something.toString();
-    }
-
-    return JSON.stringify(something);
   }
 
   public parseMessage<T = any>(data: Uint8Array): T {

@@ -21,14 +21,14 @@ export default [
   ...compat.extends('plugin:@typescript-eslint/recommended'),
   ...compat.extends('airbnb-base/legacy'),
   {
-  plugins: {
-    '@typescript-eslint': typescriptEslint,
-  },
+    plugins: {
+      '@typescript-eslint': typescriptEslint,
+    },
 
-  languageOptions: {
+    languageOptions: {
       globals: {
-          ...globals.browser,
-          ...Object.fromEntries(Object.entries(globals.commonjs).map(([key]) => [key, 'off'])),
+        ...globals.browser,
+        ...Object.fromEntries(Object.entries(globals.commonjs).map(([key]) => [key, 'off'])),
       },
 
       parser: tsParser,
@@ -36,17 +36,17 @@ export default [
       sourceType: 'module',
 
       parserOptions: {
-          requireConfigFile: false,
-          babelOptions: { plugins: ['@typescript-eslint/eslint-plugin'] },
+        requireConfigFile: false,
+        babelOptions: { plugins: ['@typescript-eslint/eslint-plugin'] },
       },
-  },
+    },
 
-  rules: {
+    rules: {
       strict: ['error', 'global'],
 
       quotes: ['error', 'single', {
-          allowTemplateLiterals: true,
-          avoidEscape: true,
+        allowTemplateLiterals: true,
+        avoidEscape: true,
       }],
 
       'no-eval': 'off',
@@ -55,7 +55,7 @@ export default [
       'no-plusplus': 'off',
 
       'no-unused-vars': ['error', {
-          argsIgnorePattern: 'client|msg',
+        argsIgnorePattern: 'client|msg',
       }],
 
       'no-await-in-loop': 'off',
@@ -95,7 +95,8 @@ export default [
         exports: 'always-multiline',
         functions: 'always-multiline',
       }],
+    },
+  }, {
+    files: ['tests/**/*', '**/*.d.ts'],
   },
-}, {
-  files: ['tests/**/*', '**/*.d.ts'],
-}];
+];

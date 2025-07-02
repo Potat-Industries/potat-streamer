@@ -24,6 +24,8 @@ class Streamer {
 
   private restarting = false;
 
+  private restartLoop: NodeJS.Timeout | undefined;
+
   private restartCount = 0;
 
   private clientListener: CDPSession | undefined;
@@ -174,6 +176,16 @@ class Streamer {
     ffmpeg.on('error', (err) => {
       Logger.error('FFmpeg error:', (err as Error).message);
     });
+
+    if (this.restartLoop) {
+      clearInterval(this.restartLoop);
+    }
+
+    this.restartLoop = setInterval(() => {
+      this.restartStream().catch((err) => {
+        Logger.error('Error during restart loop:', (err as Error).message);
+      });
+    }, 48 * 60 * 60 * 1000); // Restart every 2 days.
 
     return ffmpeg;
   }
