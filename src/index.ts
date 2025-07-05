@@ -147,7 +147,7 @@ class Streamer {
       '-c:a', 'aac',
       '-b:a', '128k',
       '-f', 'flv',
-      `rtmp://live.twitch.tv/app/${this.config.streamKey}`,
+      `rtmp://127.0.0.1:1935/live/potato`,
     ]);
 
     this.pid = ffmpeg.pid;
@@ -274,6 +274,8 @@ class Streamer {
       }
       await page.addStyleTag({ content: this.config.injectedCss });
     }
+
+    setInterval(() => page.reload(), 10 * 60 * 60 * 1000);
 
     return page.createCDPSession();
   }

@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  nginx:
+    build: .
+    image: tiangolo/nginx-rtmp
+    ports:
+      - "1935:1935"
+    volumes:
+      - ./streamer.conf:/etc/nginx/nginx.conf:ro
+      - ./src:/usr/share/nginx/html

@@ -56,8 +56,6 @@ export class NatsClient {
       throw new Error('NATS client not initialized');
     }
 
-    setInterval(() => this.page?.reload(), 10 * 60 * 60 * 1000);
-
     return this.#client;
   }
 
