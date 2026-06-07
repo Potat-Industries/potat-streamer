@@ -162,7 +162,9 @@ class Streamer {
           return;
         }
 
-        const response = await fetch(this.liveCheckUrl);
+        const response = await fetch(this.liveCheckUrl, {
+          signal: AbortSignal.timeout(10_000),
+        });
         if (!response.ok) {
           Logger.error(`Live check failed with status ${response.status}`);
           return;
