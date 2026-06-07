@@ -46,10 +46,13 @@ class Streamer {
 
   private readonly liveCheckUrl: string;
 
+  private readonly liveCheckAPIEnabled: boolean;
+
   constructor(config: typeof configuration) {
     this.config = config;
     this.liveCheckInterval = this.config.liveCheckIntervalMs ?? 5 * 60 * 1000;
     this.liveCheckUrl = this.config.liveCheckUrl || 'https://api.catquery.com/user/live?name=potatbotat';
+    this.liveCheckAPIEnabled = this.config.liveCheckAPIEnabled ?? true;
 
     if (!this.config.streamKey || !this.config.url) {
       Logger.error('Please provide streamKey and url in this.config.json');
@@ -162,20 +165,22 @@ class Streamer {
           return;
         }
 
-        const response = await fetch(this.liveCheckUrl, {
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!response.ok) {
-          Logger.error(`Live check failed with status ${response.status}`);
-          return;
-        }
+        if (this.liveCheckAPIEnabled) {
+          const response = await fetch(this.liveCheckUrl, {
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!response.ok) {
+            Logger.error(`Live check failed with status ${response.status}`);
+            return;
+          }
 
-        const data = await response.json() as { live?: unknown };
-        if (data.live === false) {
-          Logger.warn('Live check reported stream offline, restarting stream');
-          await this.restartStream();
-        } else if (typeof data.live !== 'boolean') {
-          Logger.warn('Live check response must include live as a boolean');
+          const data = await response.json() as { live?: unknown };
+          if (data.live === false) {
+            Logger.warn('Live check reported stream offline, restarting stream');
+            await this.restartStream();
+          } else if (typeof data.live !== 'boolean') {
+            Logger.warn('Live check response must include live as a boolean');
+          }
         }
       } catch (err) {
         Logger.error('Error during live check:', (err as Error).message);
