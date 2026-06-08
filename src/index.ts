@@ -26,6 +26,8 @@ class Streamer {
 
   private liveCheckLoop: NodeJS.Timeout | undefined;
 
+  private liveCheckFalseCount = 0;
+
   private restartCount = 0;
 
   private clientListener: CDPSession | undefined;
@@ -48,11 +50,14 @@ class Streamer {
 
   private readonly liveCheckAPIEnabled: boolean;
 
+  private readonly liveCheckFalseThreshold: number;
+
   constructor(config: typeof configuration) {
     this.config = config;
     this.liveCheckInterval = this.config.liveCheckIntervalMs ?? 5 * 60 * 1000;
     this.liveCheckUrl = this.config.liveCheckUrl || 'https://api.catquery.com/user/live?name=potatbotat';
     this.liveCheckAPIEnabled = this.config.liveCheckAPIEnabled ?? true;
+    this.liveCheckFalseThreshold = this.config.liveCheckFalseThreshold ?? 3;
 
     if (!this.config.streamKey || !this.config.url) {
       Logger.error('Please provide streamKey and url in this.config.json');
@@ -176,10 +181,16 @@ class Streamer {
 
           const data = await response.json() as { live?: unknown };
           if (data.live === false) {
-            Logger.warn('Live check reported stream offline, restarting stream');
-            await this.restartStream();
-          } else if (typeof data.live !== 'boolean') {
-            Logger.warn('Live check response must include live as a boolean');
+            this.liveCheckFalseCount++;
+            if (this.liveCheckFalseCount >= this.liveCheckFalseThreshold) {
+              Logger.warn(`Live check reported stream offline ${this.liveCheckFalseCount} times, restarting stream`);
+              this.liveCheckFalseCount = 0;
+              await this.restartStream();
+            } else {
+              Logger.warn(`Live check reported stream offline (${this.liveCheckFalseCount}/${this.liveCheckFalseThreshold})`);
+            }
+          } else if (data.live === true) {
+            this.liveCheckFalseCount = 0;
           }
         }
       } catch (err) {
