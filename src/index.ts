@@ -24,13 +24,17 @@ class Streamer {
 
   private restarting = false;
 
-  private restartLoop: NodeJS.Timeout | undefined;
+  private liveCheckLoop: NodeJS.Timeout | undefined;
+
+  private liveCheckFalseCount = 0;
 
   private restartCount = 0;
 
   private clientListener: CDPSession | undefined;
 
   private pid: number | undefined;
+
+  private ffmpeg: ChildProcessWithoutNullStreams | undefined;
 
   private config: typeof configuration;
 
@@ -40,8 +44,21 @@ class Streamer {
 
   private readonly broker = new NatsClient();
 
+  private readonly liveCheckInterval: number;
+
+  private readonly liveCheckUrl: string;
+
+  private readonly liveCheckAPIEnabled: boolean;
+
+  private readonly liveCheckFalseThreshold: number;
+
   constructor(config: typeof configuration) {
     this.config = config;
+    this.liveCheckInterval = this.config.liveCheckIntervalMs ?? 5 * 60 * 1000;
+    this.liveCheckUrl = this.config.liveCheckUrl || 'https://api.catquery.com/user/live?name=potatbotat';
+    this.liveCheckAPIEnabled = this.config.liveCheckAPIEnabled ?? true;
+    this.liveCheckFalseThreshold = this.config.liveCheckFalseThreshold ?? 3;
+
     if (!this.config.streamKey || !this.config.url) {
       Logger.error('Please provide streamKey and url in this.config.json');
       process.exit(1);
@@ -52,7 +69,6 @@ class Streamer {
     process.on('exit', () => this.shutdownHook());
     process.on('uncaughtException', (err) => {
       Logger.error('Uncaught Exception:', (err as Error).stack ?? err.toString());
-      ++this.restartCount;
       this.restartStream();
     });
     process.on('unhandledRejection', (err) => {
@@ -63,11 +79,16 @@ class Streamer {
   }
 
   public async restartStream(): Promise<boolean> {
+    if (this.restarting) {
+      return false;
+    }
+
+    ++this.restartCount;
+
     if (this.restartCount >= 5) {
       Logger.error('Restart limit reached. Exiting...');
-      this.shutdownHook();
-    }
-    if (this.restarting) {
+      await this.shutdownHook();
+
       return false;
     }
 
@@ -78,6 +99,7 @@ class Streamer {
       this.broker.setPage = undefined;
       await this.initStream();
       Logger.debug('Stream restarted');
+      this.restartCount = 0;
 
       return true;
     } catch (e) {
@@ -86,7 +108,6 @@ class Streamer {
       return false;
     } finally {
       this.restarting = false;
-      this.restartCount = 0;
     }
   }
 
@@ -109,6 +130,7 @@ class Streamer {
       }
 
       this.pid = undefined;
+      this.ffmpeg = undefined;
       this.cleanupFFmpeg = () => {};
 
       resolve(true);
@@ -122,6 +144,59 @@ class Streamer {
     await this.broker.destroy();
     Logger.debug('Exiting...');
     process.exit();
+  }
+
+  private startLiveCheck(): void {
+    if (this.liveCheckLoop) {
+      clearInterval(this.liveCheckLoop);
+    }
+
+    this.liveCheckLoop = setInterval(async () => {
+      if (this.restarting) {
+        return;
+      }
+
+      try {
+        if (
+          !this.pid ||
+          !this.ffmpeg ||
+          this.ffmpeg.killed ||
+          this.ffmpeg.exitCode !== null ||
+          !this.ffmpeg.stdin.writable
+        ) {
+          Logger.warn('FFmpeg process is not running, restarting stream');
+          await this.restartStream();
+
+          return;
+        }
+
+        if (this.liveCheckAPIEnabled) {
+          const response = await fetch(this.liveCheckUrl, {
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!response.ok) {
+            Logger.error(`Live check failed with status ${response.status}`);
+            return;
+          }
+
+          const data = await response.json() as { live?: unknown };
+          if (data.live === false) {
+            this.liveCheckFalseCount++;
+            if (this.liveCheckFalseCount >= this.liveCheckFalseThreshold) {
+              Logger.warn(`Live check reported stream offline ${this.liveCheckFalseCount} times, restarting stream`);
+              this.liveCheckFalseCount = 0;
+              await this.restartStream();
+            } else {
+              Logger.warn(`Live check reported stream offline (${this.liveCheckFalseCount}/${this.liveCheckFalseThreshold})`);
+            }
+          } else if (data.live === true) {
+            this.liveCheckFalseCount = 0;
+          }
+        }
+      } catch (err) {
+        Logger.error('Error during live check:', (err as Error).message);
+      }
+    }, this.liveCheckInterval);
   }
 
   private async spawnFFmpeg(): Promise<ChildProcessWithoutNullStreams> {
@@ -151,6 +226,7 @@ class Streamer {
     ]);
 
     this.pid = ffmpeg.pid;
+    this.ffmpeg = ffmpeg;
 
     this.cleanupFFmpeg = async (): Promise<void> => {
       try {
@@ -177,15 +253,7 @@ class Streamer {
       Logger.error('FFmpeg error:', (err as Error).message);
     });
 
-    if (this.restartLoop) {
-      clearInterval(this.restartLoop);
-    }
-
-    this.restartLoop = setInterval(() => {
-      this.restartStream().catch((err) => {
-        Logger.error('Error during restart loop:', (err as Error).message);
-      });
-    }, 48 * 60 * 60 * 1000); // Restart every 2 days.
+    this.startLiveCheck();
 
     return ffmpeg;
   }
