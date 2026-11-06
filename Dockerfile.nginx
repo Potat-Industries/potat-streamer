@@ -1,6 +1,5 @@
 FROM tiangolo/nginx-rtmp
 
-COPY streamer.conf /etc/nginx/nginx.conf
 COPY stunnel.conf /etc/stunnel/stunnel.conf
 
 RUN apt-get update && \

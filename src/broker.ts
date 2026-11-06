@@ -1,7 +1,7 @@
 /* eslint-disable no-unused-vars */ // fucking hate eslint SO MANY PLUGINS REQUIRED
 import Logger from './logger.js';
 import { Page } from 'puppeteer';
-import { streamer } from './index.js';
+import { RestartScope, streamer } from './index.js';
 import {
   connect,
   JSONCodec,
@@ -43,6 +43,8 @@ export class NatsClient {
 
   #retryCount = 0;
 
+  #destroyed = false;
+
   public page: Page | undefined;
 
   set setPage(page: Page | undefined) {
@@ -61,25 +63,22 @@ export class NatsClient {
 
   public async initialize(): Promise<void> {
     try {
-      this.#client = await connect({ servers: 'localhost' });
+      const client = await connect({ servers: 'localhost' });
+      this.#client = client;
 
-      const done = this.client.closed();
+      const done = client.closed();
 
       this.#retryCount = 0;
 
       this.setConsumer(EventStream.BOT);
 
-      const ping = await this.#client.request(
-        EventStream.STREAMER_PING,
-        undefined,
-        { timeout: 5000 },
-      );
-
-      if (!ping) {
-        Logger.error('Failed to ping PotatBotat');
-      } else {
+      // The bot being offline is not a broker failure, so stay connected.
+      try {
+        await client.request(EventStream.STREAMER_PING, undefined, { timeout: 5000 });
         Logger.debug('Broker connected');
         this.publish(EventStream.STREAMER_CONNECTED);
+      } catch (err) {
+        Logger.warn(`Failed to ping PotatBotat: ${(err as Error).message}`);
       }
 
       // blocking until the connection is closed
@@ -88,7 +87,7 @@ export class NatsClient {
         Logger.error(`NATS connection closed: ${err.message}`);
       }
 
-      if (this.client.isClosed() && !this.client.isDraining()) {
+      if (!this.#destroyed) {
         Logger.warn('NATS connection unexpectedly closed, reconnecting...');
         return this.reconnect();
       }
@@ -101,6 +100,8 @@ export class NatsClient {
   }
 
   public async destroy(): Promise<void> {
+    this.#destroyed = true;
+
     if (this.#client) {
       Logger.warn('Closing NATS connection');
       await this.#client.drain();
@@ -110,7 +111,17 @@ export class NatsClient {
   }
 
   public async reconnect(): Promise<void> {
+    if (this.#destroyed) {
+      return;
+    }
+
+    const previous = this.#client;
     this.#client = undefined;
+
+    await previous?.close().catch((err) => {
+      Logger.warn(`Failed to close NATS connection: ${(err as Error).message}`);
+    });
+
     this.#retryCount++;
     const delay = Math.min(1000 * 2 ** this.#retryCount, 30000); // Exponential backoff
     await new Promise((resolve) => setTimeout(resolve, delay));
@@ -170,15 +181,13 @@ export class NatsClient {
 
         if (this.page) {
           Logger.debug('Reloading page');
-          const result = await this.page.reload();
-          if (result) {
-            await this.publish(message.reply, true);
-          } else {
-            await this.publish(message.reply, false);
-            Logger.warn('Page reload failed');
-          }
+          const result = await this.page.reload().catch((err) => {
+            Logger.warn(`Page reload failed: ${(err as Error).message}`);
+          });
+          await this.publish(message.reply, Boolean(result));
         } else {
           Logger.warn('Page is not defined, cannot reload');
+          await this.publish(message.reply, false);
         }
 
         break;
@@ -190,8 +199,10 @@ export class NatsClient {
           return;
         }
 
-        Logger.debug(`Restarting stream`);
-        const result = await streamer.restartStream();
+        const scope: RestartScope = data?.target === 'page' || data?.target === 'ffmpeg' ? data.target : 'all';
+
+        Logger.debug(`Restarting stream (${scope})`);
+        const result = await streamer.restartStream(scope);
         await this.publish(message.reply, result);
 
         break;
@@ -219,7 +230,8 @@ export class NatsClient {
           Logger.debug(`Evaluating script: ${code}`);
 
           try {
-            code = await this.page.evaluate(code).then(this.toString);
+            const result = await this.page.evaluate(code);
+            code = typeof result === 'string' ? result : JSON.stringify(result) ?? String(result);
           } catch (err) {
             code = (err as Error).message;
           }
@@ -229,6 +241,7 @@ export class NatsClient {
           Logger.debug(`Script evaluated: ${code}`);
         } else {
           Logger.warn('Page is not defined, cannot evaluate script');
+          await this.publish(message.reply, { id: data?.id, result: 'Page is not available' });
         }
 
         break;

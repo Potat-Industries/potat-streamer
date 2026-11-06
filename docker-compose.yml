@@ -1,17 +1,14 @@
-version: '3.8'
-
 services:
   nginx:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile.nginx
-    image: tiangolo/nginx-rtmp
+    image: potat-nginx-rtmp
     restart: always
     ports:
-      - "1935:1935"
+      - "127.0.0.1:1935:1935"
     volumes:
       - ./streamer.conf:/etc/nginx/nginx.conf:ro
-      - ./src:/usr/share/nginx/html
 
   streamer:
     build:
@@ -21,6 +18,8 @@ services:
     network_mode: host
     depends_on:
       - nginx
-    command: npm start
-    environment:
-      - CHROME_URL=ws://chrome:4444/devtools/browser
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./cookies.json:/app/cookies.json
+      - ./image.png:/app/image.png:ro
+      - ./music.mp3:/app/music.mp3:ro

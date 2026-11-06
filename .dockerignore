@@ -1,0 +1,10 @@
+.git
+.github
+.claude
+node_modules
+dist
+config.json
+cookies.json
+streamer.conf
+image.png
+music.mp3
